@@ -1,0 +1,9 @@
+{
+  "listen_ip": "127.0.0.1",
+  "listen_port": "2211",
+  "anonymous": true,
+  "root_dir": null,
+  "users": {
+    "name": "password"
+  }
+}
