@@ -4,6 +4,7 @@
 namespace Monyxie\FtpDemo\Server;
 
 
+use Closure;
 use Monolog\Handler\ErrorLogHandler;
 use Monolog\Logger;
 use Psr\Log\LoggerAwareTrait;
@@ -15,6 +16,8 @@ use React\Socket\Server as SocketServer;
 
 class Server
 {
+    const VERSION = '0.0.1';
+
     use LoggerAwareTrait;
 
     /**
@@ -78,7 +81,7 @@ class Server
         $this->controlServer->on('connection', function (ConnectionInterface $connection) {
             $this->logger->debug('connection established');
 
-            $connection->write("220 (FTP Demo)\n");
+            $connection->write("220 (FTP Demo v" . static::VERSION . ")\n");
 
             $connection->on('data', function ($data) use ($connection) {
                 $this->handleControlData($connection, $data);
@@ -112,9 +115,9 @@ class Server
             $this->sessions[$sessionId] = [
                 'user' => null,
                 'authenticated' => false,
-                'active_port' => null,
+                'active_address' => null,
                 'passive_command' => null,
-                'passive_port' => null,
+                'passive_server' => null,
                 'cwd' => '/',
                 'mode' => 'I',
             ];
@@ -162,8 +165,12 @@ class Server
                     return;
                 }
 
-                $session['active_port'] = $port;
-                $session['passive_port'] = null;
+                $session['active_address'] = $port;
+                if (isset($this->sessions[$sessionId]['passive_server'])) {
+                    $this->sessions[$sessionId]['passive_server']->close();
+                    $session['passive_server'] = null;
+                }
+
                 $connection->write("200 PORT command successful. Consider using PASV.\n");
                 break;
             case 'PWD':
@@ -221,7 +228,7 @@ class Server
                 if (!$this->ensurePort($session, $connection)) return;
                 $this->sendOrReceiveData($session, $connection, function (ConnectionInterface $dataConnection) use ($connection, $session) {
                     $dir = realpath($this->options['root_dir'] . '/' . $session['cwd']);
-                    list($output, $code) = $this->executeCommand(['ls', '-l', $dir]);
+                    list($output) = $this->executeCommand(['ls', '-l', $dir]);
                     unset($output[0]);
 
                     $connection->write("150 Here comes the directory listing.\n");
@@ -322,18 +329,19 @@ class Server
                 break;
             case 'PASV':
                 // 切换到被动模式
+                if (!$this->ensureAuth($session, $connection)) return;
                 // 生成随机端口号
                 $p1 = rand(100, 256);
                 $p2 = rand(0, 255);
                 $response = str_replace('.', ',', $this->options['listen_ip']) . ",$p1,$p2";
-                $session['active_port'] = null;
-                $session['passive_port'] = $this->options['listen_ip'] . ":" . ($p1 * 256 + $p2);
+                $session['active_address'] = null;
+                $passivePort = $this->options['listen_ip'] . ":" . ($p1 * 256 + $p2);
                 if (isset($session['passive_server'])) {
                     $session['passive_server']->close();
                 }
-                $session['passive_server'] = new SocketServer($session['passive_port'], $this->loop);
+                $session['passive_server'] = new SocketServer($passivePort, $this->loop);
 
-                $this->logger->debug('passive data server listening at: ' . $session['passive_port']);
+                $this->logger->debug('passive data server listening at: ' . $passivePort);
                 $connection->write("227 Entering Passive Mode ($response).\n");
                 break;
             default:
@@ -395,7 +403,7 @@ class Server
 
     private function ensurePort(array $session, ConnectionInterface $connection)
     {
-        if (!$session['active_port'] && !$session['passive_port']) {
+        if (!$session['active_address'] && !$session['passive_server']) {
             $connection->write("User PORT or PASV first.");
             return false;
         }
@@ -416,16 +424,16 @@ class Server
     /**
      * @param $session
      * @param ConnectionInterface $controlConnection
-     * @param \Closure $callback
+     * @param Closure $callback
      */
-    private function sendOrReceiveData($session, ConnectionInterface $controlConnection, \Closure $callback)
+    private function sendOrReceiveData($session, ConnectionInterface $controlConnection, Closure $callback)
     {
-        if ($session['active_port']) {
+        if ($session['active_address']) {
             // 主动模式
             $this->activeConnector
-                ->connect($session['active_port'])
+                ->connect($session['active_address'])
                 ->then(function (ConnectionInterface $dataConnection) use ($session, $callback) {
-                    $this->logger->debug('active data connection established at: ' . $session['active_port']);
+                    $this->logger->debug('active data connection established at: ' . $session['active_address']);
                     $callback($dataConnection);
                 })
                 ->otherwise(function () use ($controlConnection) {
@@ -433,6 +441,7 @@ class Server
                 });
         } else if ($session['passive_server']) {
             // 被动模式
+            /** @var SocketServer $dataServer */
             $dataServer = $session['passive_server'];
             $dataServer->on('connection', function (ConnectionInterface $dataConnection) use ($dataServer, $callback) {
                 $this->logger->debug('passive data connection established');
