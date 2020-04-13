@@ -68,8 +68,11 @@ class Server
         $this->setLogger($logger);
     }
 
-    public function run()
+    public function run($listen)
     {
+        if ($listen) {
+            list($this->options['listen_ip'], $this->options['listen_port']) = explode(':', $listen);
+        }
         $this->prepare($this->options['listen_ip'] . ':' . $this->options['listen_port']);
         $this->loop->run();
     }
